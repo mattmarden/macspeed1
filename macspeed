@@ -102,8 +102,13 @@ print_section() {
     local title="$1"
     local width=60
     
+    # Calculate title length without ANSI codes
+    local clean_title="${title}"
+    local title_length=${#clean_title}
+    local padding_length=$((width-title_length-3))
+    
     printf "\n%s%s" "$BLUE$BOLD" "$(printf "▶ %s " "$title")"
-    printf "%*s%s\n" $((width-${#title}-3)) "" "$(printf "%*s" $((width-${#title}-3)) "" | tr ' ' '─')" "$RESET"
+    printf "%*s%s\n" "$padding_length" "" "$(printf "%*s" "$padding_length" "" | tr ' ' '─')" "$RESET"
 }
 
 print_status() {
