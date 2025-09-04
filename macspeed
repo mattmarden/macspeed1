@@ -32,20 +32,37 @@ readonly LOG_DIR="${STATE_DIR}/logs"
 readonly SESSION_LOG="${LOG_DIR}/session-$(date +%Y%m%d-%H%M%S).log"
 readonly BACKUP_DIR="${STATE_DIR}/backups"
 
-# Terminal styling
-readonly BOLD="$(tput bold 2>/dev/null || echo '\033[1m')"
-readonly DIM="$(tput dim 2>/dev/null || echo '\033[2m')"
-readonly RESET="$(tput sgr0 2>/dev/null || echo '\033[0m')"
-
-# Color palette - Professional and accessible
-readonly BLACK="$(tput setaf 0 2>/dev/null || echo '\033[30m')"
-readonly RED="$(tput setaf 1 2>/dev/null || echo '\033[31m')"
-readonly GREEN="$(tput setaf 2 2>/dev/null || echo '\033[32m')"
-readonly YELLOW="$(tput setaf 3 2>/dev/null || echo '\033[33m')"
-readonly BLUE="$(tput setaf 4 2>/dev/null || echo '\033[34m')"
-readonly MAGENTA="$(tput setaf 5 2>/dev/null || echo '\033[35m')"
-readonly CYAN="$(tput setaf 6 2>/dev/null || echo '\033[36m')"
-readonly WHITE="$(tput setaf 7 2>/dev/null || echo '\033[37m')"
+# Terminal detection and styling
+if [[ -t 1 ]] && [[ -n "${TERM:-}" ]] && command -v tput >/dev/null 2>&1; then
+    # Interactive terminal with tput support
+    readonly BOLD="$(tput bold 2>/dev/null || echo '\033[1m')"
+    readonly DIM="$(tput dim 2>/dev/null || echo '\033[2m')"
+    readonly RESET="$(tput sgr0 2>/dev/null || echo '\033[0m')"
+    
+    # Color palette - Professional and accessible
+    readonly BLACK="$(tput setaf 0 2>/dev/null || echo '\033[30m')"
+    readonly RED="$(tput setaf 1 2>/dev/null || echo '\033[31m')"
+    readonly GREEN="$(tput setaf 2 2>/dev/null || echo '\033[32m')"
+    readonly YELLOW="$(tput setaf 3 2>/dev/null || echo '\033[33m')"
+    readonly BLUE="$(tput setaf 4 2>/dev/null || echo '\033[34m')"
+    readonly MAGENTA="$(tput setaf 5 2>/dev/null || echo '\033[35m')"
+    readonly CYAN="$(tput setaf 6 2>/dev/null || echo '\033[36m')"
+    readonly WHITE="$(tput setaf 7 2>/dev/null || echo '\033[37m')"
+else
+    # Non-interactive or CI environment - use ANSI codes
+    readonly BOLD='\033[1m'
+    readonly DIM='\033[2m'
+    readonly RESET='\033[0m'
+    
+    readonly BLACK='\033[30m'
+    readonly RED='\033[31m'
+    readonly GREEN='\033[32m'
+    readonly YELLOW='\033[33m'
+    readonly BLUE='\033[34m'
+    readonly MAGENTA='\033[35m'
+    readonly CYAN='\033[36m'
+    readonly WHITE='\033[37m'
+fi
 
 # System safety - Critical services that must never be modified
 readonly -a PROTECTED_SERVICES=(

@@ -32,19 +32,27 @@ jobs:
         bash -n install.sh
         
     - name: Test help functionality
+      env:
+        TERM: xterm
       run: |
         ./macspeed --help
         ./macspeed --version
         
     - name: Test system info (non-destructive)
+      env:
+        TERM: xterm
       run: |
         ./macspeed --info
         
     - name: Test status command (safe)
+      env:
+        TERM: xterm
       run: |
         ./macspeed --status
         
     - name: Validate state file creation
+      env:
+        TERM: xterm
       run: |
         # Run status to initialize state
         ./macspeed --status
@@ -60,6 +68,8 @@ jobs:
         echo "State file is valid JSON"
         
     - name: Test reversion (dry run)
+      env:
+        TERM: xterm
       run: |
         # Test reversion command (should be safe on clean system)
         ./macspeed --revert-all || true
