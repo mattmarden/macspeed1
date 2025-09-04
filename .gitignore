@@ -1,0 +1,54 @@
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# MacSpeed state and logs (for development)
+.macspeed/
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Development
+test/
+testing/
+debug.sh
+*.debug
+
+# Distribution
+dist/
+build/
+releases/
+
+# Homebrew formula development
+Formula/
+homebrew-*/
+
+# Archives
+*.tar.gz
+*.zip
+*.dmg
+
+# Local development
+local/
+dev/
+scratch/

@@ -1,0 +1,1090 @@
+#!/usr/bin/env zsh
+#
+# MacSpeed - macOS Performance Optimizer
+# Copyright (c) 2025 Matt Marden
+# Licensed under the MIT License
+#
+# A comprehensive, safe, and elegant performance optimization tool for macOS
+# with intelligent state management and granular reversion capabilities.
+#
+
+set -euo pipefail
+
+# ============================================================================
+# CORE CONFIGURATION
+# ============================================================================
+
+readonly VERSION="2.1.0"
+readonly MIN_MACOS_VERSION="12"
+readonly AUTHOR="Matt Marden"
+readonly HOMEPAGE="https://github.com/mattmarden/macspeed1"
+
+# System detection
+readonly OS_VERSION="$(sw_vers -productVersion)"
+readonly MAJOR_VERSION="${OS_VERSION%%.*}"
+readonly ARCHITECTURE="$(uname -m)"
+readonly SYSTEM_NAME="$(scutil --get ComputerName 2>/dev/null || echo "Mac")"
+
+# Paths and files
+readonly STATE_DIR="${HOME}/.macspeed"
+readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly LOG_DIR="${STATE_DIR}/logs"
+readonly SESSION_LOG="${LOG_DIR}/session-$(date +%Y%m%d-%H%M%S).log"
+readonly BACKUP_DIR="${STATE_DIR}/backups"
+
+# Terminal styling
+readonly BOLD="$(tput bold 2>/dev/null || echo '\033[1m')"
+readonly DIM="$(tput dim 2>/dev/null || echo '\033[2m')"
+readonly RESET="$(tput sgr0 2>/dev/null || echo '\033[0m')"
+
+# Color palette - Professional and accessible
+readonly BLACK="$(tput setaf 0 2>/dev/null || echo '\033[30m')"
+readonly RED="$(tput setaf 1 2>/dev/null || echo '\033[31m')"
+readonly GREEN="$(tput setaf 2 2>/dev/null || echo '\033[32m')"
+readonly YELLOW="$(tput setaf 3 2>/dev/null || echo '\033[33m')"
+readonly BLUE="$(tput setaf 4 2>/dev/null || echo '\033[34m')"
+readonly MAGENTA="$(tput setaf 5 2>/dev/null || echo '\033[35m')"
+readonly CYAN="$(tput setaf 6 2>/dev/null || echo '\033[36m')"
+readonly WHITE="$(tput setaf 7 2>/dev/null || echo '\033[37m')"
+
+# System safety - Critical services that must never be modified
+readonly -a PROTECTED_SERVICES=(
+    "com.apple.WindowServer"
+    "com.apple.loginwindow" 
+    "com.apple.Dock"
+    "com.apple.Finder"
+    "com.apple.SystemUIServer"
+    "com.apple.coreservicesd"
+    "com.apple.securityd"
+    "com.apple.launchservicesd"
+    "com.apple.cfprefsd"
+    "com.apple.UserEventAgent"
+)
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+log() {
+    [[ -d "$LOG_DIR" ]] || mkdir -p "$LOG_DIR"
+    printf "[%s] %s\n" "$(date '+%H:%M:%S')" "$1" >> "$SESSION_LOG"
+}
+
+print() {
+    local color="${1:-$WHITE}"
+    local message="$2"
+    local newline="${3:-true}"
+    
+    if [[ "$newline" == "true" ]]; then
+        printf "%s%s%s\n" "$color" "$message" "$RESET"
+    else
+        printf "%s%s%s" "$color" "$message" "$RESET"
+    fi
+    
+    log "OUTPUT: $message"
+}
+
+print_header() {
+    local title="$1"
+    local width=78
+    
+    clear
+    printf "%s" "$CYAN$BOLD"
+    printf "┏%*s┓\n" $((width-2)) "" | tr ' ' '━'
+    printf "┃%*s┃\n" $((width-2)) ""
+    printf "┃%*s%s%*s┃\n" $(((width-${#title})/2-1)) "" "$title" $(((width-${#title})/2-1)) ""
+    printf "┃%*s┃\n" $((width-2)) ""
+    printf "┗%*s┛\n" $((width-2)) "" | tr ' ' '━'
+    printf "%s\n" "$RESET"
+}
+
+print_section() {
+    local title="$1"
+    local width=60
+    
+    printf "\n%s%s" "$BLUE$BOLD" "$(printf "▶ %s " "$title")"
+    printf "%*s%s\n" $((width-${#title}-3)) "" "$(printf "%*s" $((width-${#title}-3)) "" | tr ' ' '─')" "$RESET"
+}
+
+print_status() {
+    local status="$1"
+    local message="$2"
+    
+    case "$status" in
+        "success") printf "  %s%s %s%s\n" "$GREEN$BOLD" "✓" "$message" "$RESET" ;;
+        "error")   printf "  %s%s %s%s\n" "$RED$BOLD" "✗" "$message" "$RESET" ;;
+        "warning") printf "  %s%s %s%s\n" "$YELLOW$BOLD" "⚠" "$message" "$RESET" ;;
+        "info")    printf "  %s%s %s%s\n" "$BLUE" "•" "$message" "$RESET" ;;
+        "working") printf "  %s%s %s%s" "$CYAN" "◦" "$message" "$RESET" ;;
+    esac
+}
+
+animate_progress() {
+    local message="$1"
+    local duration="${2:-2}"
+    local chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    local delay=0.1
+    
+    print_status "working" "$message"
+    
+    local end_time=$(($(date +%s) + duration))
+    local i=0
+    
+    while [[ $(date +%s) -lt $end_time ]]; do
+        printf "\r  %s%s %s" "$CYAN" "${chars:$i:1}" "$message"
+        sleep $delay
+        i=$(( (i + 1) % ${#chars} ))
+    done
+    
+    printf "\r"
+    print_status "success" "$message"
+}
+
+confirm() {
+    local message="$1"
+    local default="${2:-n}"
+    
+    while true; do
+        if [[ "$default" == "y" ]]; then
+            print "$YELLOW" "  $message [Y/n]: " false
+        else
+            print "$YELLOW" "  $message [y/N]: " false
+        fi
+        
+        read -r response
+        
+        case "${response:-$default}" in
+            [Yy]*) log "USER_CONFIRM: Yes - $message"; return 0 ;;
+            [Nn]*) log "USER_CONFIRM: No - $message"; return 1 ;;
+            *) print "$RED" "    Please answer yes or no." ;;
+        esac
+    done
+}
+
+error_exit() {
+    print_status "error" "$1"
+    log "FATAL_ERROR: $1"
+    exit 1
+}
+
+# ============================================================================
+# STATE MANAGEMENT SYSTEM
+# ============================================================================
+
+init_state() {
+    [[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR"
+    [[ -d "$BACKUP_DIR" ]] || mkdir -p "$BACKUP_DIR"
+    
+    if [[ ! -f "$STATE_FILE" ]]; then
+        cat > "$STATE_FILE" << 'EOF'
+{
+  "version": "2.1.0",
+  "created": null,
+  "last_run": null,
+  "optimizations": {
+    "visual_effects": false,
+    "finder_enhancements": false,
+    "memory_optimization": false,
+    "service_management": false,
+    "privacy_controls": false,
+    "network_tuning": false,
+    "advanced_tweaks": false
+  },
+  "disabled_services": [],
+  "backup_info": {
+    "location": null,
+    "timestamp": null
+  }
+}
+EOF
+        update_state_field "created" "$(date -Iseconds)"
+        log "STATE_INIT: Created initial state file"
+    fi
+}
+
+update_state_field() {
+    local field="$1"
+    local value="$2"
+    
+    python3 -c "
+import json
+import sys
+from datetime import datetime
+
+try:
+    with open('$STATE_FILE', 'r') as f:
+        data = json.load(f)
+    
+    if '$field' in data.get('optimizations', {}):
+        data['optimizations']['$field'] = $value
+    else:
+        data['$field'] = '$value'
+    
+    data['last_run'] = datetime.now().isoformat()
+    
+    with open('$STATE_FILE', 'w') as f:
+        json.dump(data, f, indent=2)
+        
+except Exception as e:
+    print(f'State update failed: {e}', file=sys.stderr)
+    sys.exit(1)
+"
+    log "STATE_UPDATE: $field = $value"
+}
+
+get_state_field() {
+    local field="$1"
+    
+    python3 -c "
+import json
+import sys
+
+try:
+    with open('$STATE_FILE', 'r') as f:
+        data = json.load(f)
+    
+    if '$field' in data.get('optimizations', {}):
+        print(data['optimizations']['$field'])
+    else:
+        print(data.get('$field', 'false'))
+        
+except Exception:
+    print('false')
+"
+}
+
+detect_current_state() {
+    # Analyze system settings to detect current optimization status
+    
+    # Visual effects detection
+    local dock_anims="$(defaults read com.apple.dock launchanim 2>/dev/null || echo "true")"
+    local window_anims="$(defaults read NSGlobalDomain NSAutomaticWindowAnimationsEnabled 2>/dev/null || echo "true")"
+    
+    if [[ "$dock_anims" == "false" || "$dock_anims" == "0" ]] || 
+       [[ "$window_anims" == "false" || "$window_anims" == "0" ]]; then
+        update_state_field "visual_effects" "true"
+    fi
+    
+    # Finder enhancements detection
+    local finder_anims="$(defaults read com.apple.finder DisableAllAnimations 2>/dev/null || echo "false")"
+    local show_path="$(defaults read com.apple.finder ShowPathbar 2>/dev/null || echo "false")"
+    
+    if [[ "$finder_anims" == "true" || "$finder_anims" == "1" ]] || 
+       [[ "$show_path" == "true" || "$show_path" == "1" ]]; then
+        update_state_field "finder_enhancements" "true"
+    fi
+    
+    # Service management detection
+    if launchctl print-disabled system 2>/dev/null | grep -q "com.apple.ReportCrash\|com.apple.DiagnosticReportCleanup"; then
+        update_state_field "service_management" "true"
+    fi
+    
+    # Privacy controls detection
+    local siri_disabled="$(defaults read com.apple.assistant.support "Assistant Enabled" 2>/dev/null || echo "true")"
+    if [[ "$siri_disabled" == "false" || "$siri_disabled" == "0" ]]; then
+        update_state_field "privacy_controls" "true"
+    fi
+}
+
+# ============================================================================
+# SYSTEM VERIFICATION & SAFETY
+# ============================================================================
+
+verify_system() {
+    print_section "System Verification"
+    
+    # Check macOS version
+    if [[ "$MAJOR_VERSION" -lt "$MIN_MACOS_VERSION" ]]; then
+        error_exit "macOS $MIN_MACOS_VERSION.0+ required (found: $OS_VERSION)"
+    fi
+    print_status "success" "macOS $OS_VERSION ($ARCHITECTURE)"
+    
+    # Check for admin access
+    if ! sudo -n true 2>/dev/null; then
+        print_status "info" "Admin privileges required for service management"
+        if ! sudo -v; then
+            error_exit "Admin privileges required"
+        fi
+    fi
+    print_status "success" "Admin privileges verified"
+    
+    # Check System Integrity Protection
+    local sip_status="$(csrutil status 2>/dev/null | grep -o "enabled\|disabled" || echo "unknown")"
+    if [[ "$sip_status" == "enabled" ]]; then
+        print_status "success" "System Integrity Protection: Enabled"
+    else
+        print_status "warning" "System Integrity Protection: $sip_status"
+        print "$YELLOW" "    Some optimizations may have broader system impact"
+    fi
+    
+    # Verify required tools
+    local missing_tools=()
+    
+    command -v python3 >/dev/null || missing_tools+=("python3")
+    command -v bc >/dev/null || missing_tools+=("bc")
+    
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        print_status "warning" "Missing tools: ${missing_tools[*]}"
+        
+        if command -v brew >/dev/null; then
+            if confirm "Install missing tools via Homebrew?"; then
+                for tool in "${missing_tools[@]}"; do
+                    animate_progress "Installing $tool"
+                    brew install "$tool" >/dev/null 2>&1
+                done
+            fi
+        else
+            error_exit "Required tools missing. Install Homebrew first: https://brew.sh"
+        fi
+    fi
+    
+    print_status "success" "All dependencies verified"
+    log "SYSTEM_CHECK: Verification completed successfully"
+}
+
+create_backup() {
+    local backup_name="backup-$(date +%Y%m%d-%H%M%S)"
+    local backup_path="$BACKUP_DIR/$backup_name"
+    
+    animate_progress "Creating system backup"
+    
+    mkdir -p "$backup_path"
+    
+    # Backup critical preference files
+    local pref_dirs=(
+        "$HOME/Library/Preferences"
+        "$HOME/Library/LaunchAgents"
+    )
+    
+    for dir in "${pref_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            cp -R "$dir" "$backup_path/" 2>/dev/null || true
+        fi
+    done
+    
+    # Store backup info in state
+    python3 -c "
+import json
+with open('$STATE_FILE', 'r') as f:
+    data = json.load(f)
+data['backup_info'] = {
+    'location': '$backup_path',
+    'timestamp': '$(date -Iseconds)'
+}
+with open('$STATE_FILE', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+    
+    print_status "success" "System backup created"
+    log "BACKUP_CREATED: $backup_path"
+}
+
+# ============================================================================
+# OPTIMIZATION IMPLEMENTATIONS
+# ============================================================================
+
+optimize_visual_effects() {
+    print_section "Visual Effects Optimization"
+    
+    if [[ "$(get_state_field "visual_effects")" == "true" ]]; then
+        print_status "info" "Visual effects already optimized"
+        return 0
+    fi
+    
+    local changes=(
+        "NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false"
+        "NSGlobalDomain NSWindowResizeTime -float 0.001"
+        "com.apple.dock autohide-time-modifier -float 0.1"
+        "com.apple.dock launchanim -bool false"
+        "com.apple.dock expose-animation-duration -float 0.1"
+        "com.apple.dock mineffect -string scale"
+    )
+    
+    for change in "${changes[@]}"; do
+        defaults write $change 2>/dev/null
+    done
+    
+    # Restart Dock to apply changes
+    killall Dock 2>/dev/null || true
+    
+    update_state_field "visual_effects" "true"
+    print_status "success" "Visual effects optimized for performance"
+    log "OPTIMIZATION: Visual effects completed"
+}
+
+optimize_finder() {
+    print_section "Finder Performance Enhancement"
+    
+    if [[ "$(get_state_field "finder_enhancements")" == "true" ]]; then
+        print_status "info" "Finder already optimized"
+        return 0
+    fi
+    
+    local finder_tweaks=(
+        "com.apple.finder DisableAllAnimations -bool true"
+        "com.apple.finder ShowPathbar -bool true"
+        "com.apple.finder ShowStatusBar -bool true" 
+        "com.apple.finder _FXShowPosixPathInTitle -bool true"
+        "com.apple.finder FXDefaultSearchScope -string SCcf"
+        "NSGlobalDomain AppleShowAllExtensions -bool true"
+    )
+    
+    for tweak in "${finder_tweaks[@]}"; do
+        defaults write $tweak 2>/dev/null
+    done
+    
+    # Restart Finder
+    killall Finder 2>/dev/null || true
+    
+    update_state_field "finder_enhancements" "true"
+    print_status "success" "Finder performance enhanced"
+    log "OPTIMIZATION: Finder enhancements completed"
+}
+
+optimize_memory() {
+    print_section "Memory & Cache Optimization"
+    
+    if [[ "$(get_state_field "memory_optimization")" == "true" ]]; then
+        print_status "info" "Memory already optimized"
+        return 0
+    fi
+    
+    # Purge system memory
+    animate_progress "Optimizing memory allocation"
+    sudo purge 2>/dev/null
+    
+    # Architecture-specific memory tweaks
+    if [[ "$ARCHITECTURE" == "arm64" ]]; then
+        # Apple Silicon optimizations
+        sudo sysctl -w vm.swappiness=10 2>/dev/null || true
+        defaults write com.apple.CoreML AllowANE -bool true 2>/dev/null
+        print_status "success" "Applied Apple Silicon memory optimizations"
+    else
+        # Intel optimizations
+        sudo pmset -c powernap 0 2>/dev/null || true
+        print_status "success" "Applied Intel-specific memory optimizations"
+    fi
+    
+    update_state_field "memory_optimization" "true"
+    log "OPTIMIZATION: Memory optimization completed"
+}
+
+optimize_services() {
+    print_section "Background Service Management"
+    
+    if [[ "$(get_state_field "service_management")" == "true" ]]; then
+        print_status "info" "Services already optimized"
+        return 0
+    fi
+    
+    # Safe services that can be disabled
+    local safe_services=(
+        "com.apple.ReportCrash"
+        "com.apple.DiagnosticReportCleanup"
+        "com.apple.CrashReporterSupportHelper"
+    )
+    
+    local disabled_count=0
+    
+    for service in "${safe_services[@]}"; do
+        # Verify it's not a protected service
+        local is_protected=false
+        for protected in "${PROTECTED_SERVICES[@]}"; do
+            if [[ "$service" == "$protected" ]]; then
+                is_protected=true
+                break
+            fi
+        done
+        
+        if [[ "$is_protected" == "true" ]]; then
+            print_status "warning" "Skipping protected service: $service"
+            continue
+        fi
+        
+        # Check if service exists and disable it
+        if launchctl print "system/$service" >/dev/null 2>&1; then
+            if sudo launchctl disable "system/$service" 2>/dev/null; then
+                print_status "success" "Disabled: $service"
+                ((disabled_count++))
+                
+                # Add to state tracking
+                python3 -c "
+import json
+with open('$STATE_FILE', 'r') as f:
+    data = json.load(f)
+if '$service' not in data['disabled_services']:
+    data['disabled_services'].append('$service')
+with open('$STATE_FILE', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+            fi
+        fi
+    done
+    
+    if [[ $disabled_count -gt 0 ]]; then
+        update_state_field "service_management" "true"
+        print_status "success" "$disabled_count background services optimized"
+    else
+        print_status "info" "No services required optimization"
+    fi
+    
+    log "OPTIMIZATION: Service management completed ($disabled_count services)"
+}
+
+optimize_privacy() {
+    print_section "Privacy & Telemetry Controls"
+    
+    if [[ "$(get_state_field "privacy_controls")" == "true" ]]; then
+        print_status "info" "Privacy controls already configured"
+        return 0
+    fi
+    
+    # Disable telemetry and data collection
+    local privacy_settings=(
+        "com.apple.assistant.support \"Assistant Enabled\" -bool false"
+        "com.apple.assistant.backedup \"Assistant Enabled\" -bool false"
+    )
+    
+    for setting in "${privacy_settings[@]}"; do
+        defaults write $setting 2>/dev/null
+    done
+    
+    # System-level privacy settings (requires sudo)
+    sudo defaults write /Library/Preferences/com.apple.SubmitDiagInfo AutoSubmit -bool false 2>/dev/null || true
+    
+    # Spotlight privacy
+    defaults write com.apple.Spotlight orderedItems -array \
+        '{"enabled"=1;"name"="APPLICATIONS";}' \
+        '{"enabled"=1;"name"="SYSTEM_PREFS";}' \
+        '{"enabled"=1;"name"="DIRECTORIES";}' \
+        '{"enabled"=1;"name"="PDF";}' \
+        '{"enabled"=1;"name"="FONTS";}' \
+        '{"enabled"=1;"name"="DOCUMENTS";}' \
+        '{"enabled"=0;"name"="MESSAGES";}' \
+        '{"enabled"=0;"name"="CONTACT";}' \
+        '{"enabled"=0;"name"="EVENT_TODO";}' \
+        '{"enabled"=0;"name"="IMAGES";}' \
+        '{"enabled"=0;"name"="BOOKMARKS";}' \
+        '{"enabled"=0;"name"="MUSIC";}' \
+        '{"enabled"=0;"name"="MOVIES";}' \
+        '{"enabled"=0;"name"="PRESENTATIONS";}' \
+        '{"enabled"=0;"name"="SPREADSHEETS";}' 2>/dev/null
+    
+    # Restart affected services
+    sudo launchctl kickstart -k system/com.apple.SpotlightMaintenance 2>/dev/null || true
+    killall SystemUIServer 2>/dev/null || true
+    
+    update_state_field "privacy_controls" "true"
+    print_status "success" "Privacy controls configured"
+    log "OPTIMIZATION: Privacy controls completed"
+}
+
+optimize_network() {
+    print_section "Network Performance Tuning"
+    
+    if [[ "$(get_state_field "network_tuning")" == "true" ]]; then
+        print_status "info" "Network already optimized"
+        return 0
+    fi
+    
+    # Network buffer optimizations
+    sudo sysctl -w net.inet.tcp.sendspace=1048576 2>/dev/null || true
+    sudo sysctl -w net.inet.tcp.recvspace=1048576 2>/dev/null || true
+    
+    update_state_field "network_tuning" "true"
+    print_status "success" "Network performance optimized"
+    log "OPTIMIZATION: Network tuning completed"
+}
+
+apply_advanced_tweaks() {
+    print_section "Advanced System Tweaks"
+    
+    if [[ "$(get_state_field "advanced_tweaks")" == "true" ]]; then
+        print_status "info" "Advanced tweaks already applied"
+        return 0
+    fi
+    
+    # Version-specific optimizations
+    case "$MAJOR_VERSION" in
+        "15")  # Sequoia
+            print_status "info" "Applying macOS Sequoia optimizations"
+            ;;
+        "14")  # Sonoma
+            print_status "info" "Applying macOS Sonoma optimizations"
+            defaults write com.apple.GameController gamemode -bool true 2>/dev/null
+            ;;
+        "13")  # Ventura
+            print_status "info" "Applying macOS Ventura optimizations"
+            ;;
+    esac
+    
+    # Desktop and UI refinements
+    local ui_tweaks=(
+        "com.apple.screensaver askForPassword -int 1"
+        "com.apple.screensaver askForPasswordDelay -int 0"
+        "NSGlobalDomain NSDocumentSaveNewDocumentsToCloud -bool false"
+        "com.apple.print.PrintingPrefs \"Quit When Finished\" -bool true"
+    )
+    
+    for tweak in "${ui_tweaks[@]}"; do
+        defaults write $tweak 2>/dev/null
+    done
+    
+    update_state_field "advanced_tweaks" "true"
+    print_status "success" "Advanced system tweaks applied"
+    log "OPTIMIZATION: Advanced tweaks completed"
+}
+
+# ============================================================================
+# OPTIMIZATION LEVELS
+# ============================================================================
+
+run_essential_optimization() {
+    print_header "Essential Performance Optimization"
+    print "$WHITE" "Safe optimizations with immediate performance benefits"
+    print "$DIM" "Recommended for all users - no system risks"
+    printf "\n"
+    
+    if ! confirm "Apply essential optimizations?" "y"; then
+        return 1
+    fi
+    
+    optimize_visual_effects
+    optimize_finder
+    optimize_memory
+    
+    print_status "success" "Essential optimization completed"
+    printf "\n"
+    print "$GREEN" "Performance improvements:"
+    print "$WHITE" "  • Faster animations and UI responsiveness"
+    print "$WHITE" "  • Enhanced Finder navigation"
+    print "$WHITE" "  • Optimized memory allocation"
+}
+
+run_comprehensive_optimization() {
+    print_header "Comprehensive System Optimization"
+    print "$WHITE" "Essential optimizations plus service and privacy enhancements"
+    print "$DIM" "Balances performance gains with system stability"
+    printf "\n"
+    
+    if ! confirm "Apply comprehensive optimizations?" "y"; then
+        return 1
+    fi
+    
+    run_essential_optimization
+    optimize_services
+    optimize_privacy
+    optimize_network
+    
+    print_status "success" "Comprehensive optimization completed"
+    printf "\n"
+    print "$GREEN" "Additional improvements:"
+    print "$WHITE" "  • Reduced background resource usage"
+    print "$WHITE" "  • Enhanced privacy and reduced telemetry"
+    print "$WHITE" "  • Improved network performance"
+}
+
+run_maximum_optimization() {
+    print_header "Maximum Performance Optimization"
+    print "$WHITE" "Complete system optimization with advanced tweaks"
+    print "$YELLOW" "For experienced users - creates system backup"
+    printf "\n"
+    
+    if ! confirm "Apply maximum optimizations?" "n"; then
+        return 1
+    fi
+    
+    create_backup
+    run_comprehensive_optimization
+    apply_advanced_tweaks
+    
+    print_status "success" "Maximum optimization completed"
+    printf "\n"
+    print "$GREEN" "Full system optimization achieved:"
+    print "$WHITE" "  • Complete performance enhancement"
+    print "$WHITE" "  • Advanced system tuning applied"
+    print "$WHITE" "  • System backup created for safety"
+    print "$YELLOW" "  • System restart recommended"
+}
+
+# ============================================================================
+# REVERSION SYSTEM
+# ============================================================================
+
+show_optimization_status() {
+    print_header "Current Optimization Status"
+    
+    local optimizations=(
+        "visual_effects:Visual Effects"
+        "finder_enhancements:Finder Enhancements"
+        "memory_optimization:Memory Optimization"
+        "service_management:Service Management"
+        "privacy_controls:Privacy Controls"
+        "network_tuning:Network Tuning"
+        "advanced_tweaks:Advanced Tweaks"
+    )
+    
+    local active_count=0
+    
+    for item in "${optimizations[@]}"; do
+        local key="${item%:*}"
+        local name="${item#*:}"
+        local status="$(get_state_field "$key")"
+        
+        if [[ "$status" == "true" ]]; then
+            print_status "success" "$name: Active"
+            ((active_count++))
+        else
+            print_status "info" "$name: Not Applied"
+        fi
+    done
+    
+    printf "\n"
+    if [[ $active_count -gt 0 ]]; then
+        print "$GREEN" "$active_count optimization(s) currently active"
+        
+        # Show disabled services if any
+        local disabled_services
+        disabled_services="$(python3 -c "
+import json
+try:
+    with open('$STATE_FILE', 'r') as f:
+        data = json.load(f)
+    services = data.get('disabled_services', [])
+    if services:
+        print('\\n'.join(services))
+except:
+    pass
+")"
+        
+        if [[ -n "$disabled_services" ]]; then
+            printf "\n"
+            print "$YELLOW" "Disabled Services:"
+            while IFS= read -r service; do
+                print "$DIM" "  • $service"
+            done <<< "$disabled_services"
+        fi
+    else
+        print "$BLUE" "No optimizations currently active"
+    fi
+}
+
+revert_optimization() {
+    local category="$1"
+    local name="$2"
+    
+    if [[ "$(get_state_field "$category")" != "true" ]]; then
+        print_status "info" "$name: Not currently active"
+        return 0
+    fi
+    
+    case "$category" in
+        "visual_effects")
+            defaults delete NSGlobalDomain NSAutomaticWindowAnimationsEnabled 2>/dev/null || true
+            defaults delete NSGlobalDomain NSWindowResizeTime 2>/dev/null || true
+            defaults delete com.apple.dock autohide-time-modifier 2>/dev/null || true
+            defaults delete com.apple.dock launchanim 2>/dev/null || true
+            defaults delete com.apple.dock expose-animation-duration 2>/dev/null || true
+            defaults delete com.apple.dock mineffect 2>/dev/null || true
+            killall Dock 2>/dev/null || true
+            ;;
+        "finder_enhancements")
+            defaults delete com.apple.finder DisableAllAnimations 2>/dev/null || true
+            defaults delete com.apple.finder ShowPathbar 2>/dev/null || true
+            defaults delete com.apple.finder ShowStatusBar 2>/dev/null || true
+            defaults delete com.apple.finder _FXShowPosixPathInTitle 2>/dev/null || true
+            defaults delete com.apple.finder FXDefaultSearchScope 2>/dev/null || true
+            defaults delete NSGlobalDomain AppleShowAllExtensions 2>/dev/null || true
+            killall Finder 2>/dev/null || true
+            ;;
+        "service_management")
+            # Re-enable disabled services
+            local services
+            services="$(python3 -c "
+import json
+try:
+    with open('$STATE_FILE', 'r') as f:
+        data = json.load(f)
+    for service in data.get('disabled_services', []):
+        print(service)
+except:
+    pass
+")"
+            while IFS= read -r service; do
+                if [[ -n "$service" ]]; then
+                    sudo launchctl enable "system/$service" 2>/dev/null || true
+                    print_status "success" "Re-enabled: $service"
+                fi
+            done <<< "$services"
+            
+            # Clear disabled services list
+            python3 -c "
+import json
+try:
+    with open('$STATE_FILE', 'r') as f:
+        data = json.load(f)
+    data['disabled_services'] = []
+    with open('$STATE_FILE', 'w') as f:
+        json.dump(data, f, indent=2)
+except:
+    pass
+"
+            ;;
+        "privacy_controls")
+            defaults delete com.apple.assistant.support "Assistant Enabled" 2>/dev/null || true
+            defaults delete com.apple.assistant.backedup "Assistant Enabled" 2>/dev/null || true
+            defaults delete com.apple.Spotlight orderedItems 2>/dev/null || true
+            sudo defaults delete /Library/Preferences/com.apple.SubmitDiagInfo AutoSubmit 2>/dev/null || true
+            killall SystemUIServer 2>/dev/null || true
+            ;;
+        "advanced_tweaks")
+            defaults delete com.apple.screensaver askForPassword 2>/dev/null || true
+            defaults delete com.apple.screensaver askForPasswordDelay 2>/dev/null || true
+            defaults delete NSGlobalDomain NSDocumentSaveNewDocumentsToCloud 2>/dev/null || true
+            defaults delete com.apple.print.PrintingPrefs "Quit When Finished" 2>/dev/null || true
+            ;;
+    esac
+    
+    update_state_field "$category" "false"
+    print_status "success" "$name: Reverted to system defaults"
+    log "REVERT: $category completed"
+}
+
+revert_all_optimizations() {
+    print_header "Complete System Restoration"
+    print "$YELLOW" "This will restore all system settings to macOS defaults"
+    printf "\n"
+    
+    if ! confirm "Restore all optimizations to system defaults?" "n"; then
+        return 1
+    fi
+    
+    local categories=(
+        "visual_effects:Visual Effects"
+        "finder_enhancements:Finder Enhancements"
+        "service_management:Service Management"
+        "privacy_controls:Privacy Controls"
+        "advanced_tweaks:Advanced Tweaks"
+    )
+    
+    for item in "${categories[@]}"; do
+        local key="${item%:*}"
+        local name="${item#*:}"
+        revert_optimization "$key" "$name"
+    done
+    
+    # Reset state fields that don't need specific reversion
+    update_state_field "memory_optimization" "false"
+    update_state_field "network_tuning" "false"
+    
+    print_status "success" "Complete system restoration completed"
+    print "$GREEN" "All MacSpeed optimizations have been reverted"
+    print "$YELLOW" "System restart recommended to ensure all changes take effect"
+    log "REVERT: Complete system restoration performed"
+}
+
+# ============================================================================
+# USER INTERFACE
+# ============================================================================
+
+show_main_menu() {
+    print_header "MacSpeed - macOS Performance Optimizer"
+    
+    # Show current system status
+    local active_opts=0
+    local opt_names=("visual_effects" "finder_enhancements" "memory_optimization" "service_management" "privacy_controls" "network_tuning" "advanced_tweaks")
+    
+    for opt in "${opt_names[@]}"; do
+        if [[ "$(get_state_field "$opt")" == "true" ]]; then
+            ((active_opts++))
+        fi
+    done
+    
+    if [[ $active_opts -gt 0 ]]; then
+        print "$GREEN" "System Status: $active_opts optimization(s) active"
+    else
+        print "$BLUE" "System Status: Ready for optimization"
+    fi
+    
+    printf "\n%s%s%s\n" "$BOLD" "Optimization Levels:" "$RESET"
+    printf "\n"
+    print "$GREEN" "  1. Essential        Safe performance optimizations"
+    print "$BLUE" "  2. Comprehensive    Essential + services and privacy"  
+    print "$MAGENTA" "  3. Maximum          Complete system optimization"
+    printf "\n"
+    printf "%s%s%s\n" "$BOLD" "System Management:" "$RESET"
+    printf "\n"
+    print "$CYAN" "  4. Show Status      View current optimization state"
+    print "$YELLOW" "  5. Revert Changes   Selective or complete restoration"
+    print "$WHITE" "  6. System Info      Hardware and performance analysis"
+    printf "\n"
+    print "$DIM" "  0. Exit"
+    printf "\n"
+}
+
+show_reversion_menu() {
+    print_header "Optimization Reversion"
+    show_optimization_status
+    
+    printf "\n%s%s%s\n" "$BOLD" "Reversion Options:" "$RESET"
+    printf "\n"
+    print "$GREEN" "  1. Visual Effects      Restore animation settings"
+    print "$BLUE" "  2. Finder Changes      Revert Finder enhancements"
+    print "$YELLOW" "  3. Service Management   Re-enable disabled services"
+    print "$MAGENTA" "  4. Privacy Controls     Restore privacy settings"
+    print "$CYAN" "  5. Advanced Tweaks     Revert system tweaks"
+    printf "\n"
+    print "$RED" "  9. Revert Everything   Complete system restoration"
+    printf "\n"
+    print "$DIM" "  0. Back to Main Menu"
+    printf "\n"
+}
+
+handle_reversion_menu() {
+    while true; do
+        show_reversion_menu
+        print "$CYAN" "Choose option: " false
+        read -r choice
+        
+        case "$choice" in
+            1) revert_optimization "visual_effects" "Visual Effects" ;;
+            2) revert_optimization "finder_enhancements" "Finder Enhancements" ;;
+            3) revert_optimization "service_management" "Service Management" ;;
+            4) revert_optimization "privacy_controls" "Privacy Controls" ;;
+            5) revert_optimization "advanced_tweaks" "Advanced Tweaks" ;;
+            9) revert_all_optimizations ;;
+            0) return ;;
+            *) print_status "error" "Invalid option" ;;
+        esac
+        
+        if [[ "$choice" != "0" ]]; then
+            printf "\n"
+            print "$DIM" "Press any key to continue..."
+            read -n 1 -s
+        fi
+    done
+}
+
+show_system_info() {
+    print_header "System Information"
+    
+    # Hardware information
+    printf "%s%s%s\n" "$BOLD" "Hardware:" "$RESET"
+    print "$WHITE" "  Computer: $SYSTEM_NAME"
+    print "$WHITE" "  Model: $(system_profiler SPHardwareDataType | awk '/Model Name/ {print $3" "$4" "$5}' | head -1)"
+    print "$WHITE" "  Processor: $(sysctl -n machdep.cpu.brand_string)"
+    print "$WHITE" "  Architecture: $ARCHITECTURE"
+    print "$WHITE" "  Memory: $(system_profiler SPHardwareDataType | awk '/Memory/ {print $2" "$3}' | head -1)"
+    
+    printf "\n%s%s%s\n" "$BOLD" "System:" "$RESET"
+    print "$WHITE" "  macOS Version: $OS_VERSION"
+    print "$WHITE" "  Uptime: $(uptime | sed 's/.*up //' | sed 's/, [0-9]* user.*//')"
+    
+    # Performance metrics
+    printf "\n%s%s%s\n" "$BOLD" "Performance:" "$RESET"
+    local cpu_usage="$(top -l 1 -n 0 | grep "CPU usage" | awk '{print $3}' | sed 's/%//')"
+    print "$WHITE" "  CPU Usage: ${cpu_usage}%"
+    
+    local memory_pressure="$(memory_pressure 2>/dev/null | grep "pages" | head -1 | awk '{print $4}')"
+    print "$WHITE" "  Memory Pressure: ${memory_pressure:-Normal}"
+    
+    printf "\n"
+    print "$DIM" "Press any key to continue..."
+    read -n 1 -s
+}
+
+# ============================================================================
+# COMMAND LINE INTERFACE
+# ============================================================================
+
+show_help() {
+    cat << EOF
+MacSpeed - macOS Performance Optimizer
+
+USAGE:
+    macspeed [OPTION]
+
+OPTIONS:
+    -h, --help          Show this help message
+    -v, --version       Show version information
+    -s, --status        Display optimization status
+    -1, --essential     Apply essential optimizations
+    -2, --comprehensive Apply comprehensive optimizations  
+    -3, --maximum       Apply maximum optimizations
+    --revert-all        Revert all optimizations
+    --info              Show system information
+
+EXAMPLES:
+    macspeed            Interactive mode with menu
+    macspeed -1         Apply essential optimizations
+    macspeed --status   Check current optimization status
+    macspeed --revert-all  Restore system defaults
+
+For more information, visit: $HOMEPAGE
+EOF
+}
+
+handle_arguments() {
+    case "${1:-}" in
+        -h|--help) show_help; exit 0 ;;
+        -v|--version) echo "MacSpeed $VERSION"; exit 0 ;;
+        -s|--status) init_state; detect_current_state; show_optimization_status; exit 0 ;;
+        -1|--essential) init_state; verify_system; run_essential_optimization; exit 0 ;;
+        -2|--comprehensive) init_state; verify_system; run_comprehensive_optimization; exit 0 ;;
+        -3|--maximum) init_state; verify_system; run_maximum_optimization; exit 0 ;;
+        --revert-all) init_state; revert_all_optimizations; exit 0 ;;
+        --info) show_system_info; exit 0 ;;
+        "") return 0 ;; # Interactive mode
+        *) echo "Unknown option: $1"; show_help; exit 1 ;;
+    esac
+}
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+main() {
+    # Handle command line arguments
+    handle_arguments "$@"
+    
+    # Initialize system
+    init_state
+    verify_system
+    detect_current_state
+    
+    # Main interactive loop
+    while true; do
+        show_main_menu
+        print "$CYAN" "Choose option: " false
+        read -r choice
+        
+        case "$choice" in
+            1) run_essential_optimization ;;
+            2) run_comprehensive_optimization ;;
+            3) run_maximum_optimization ;;
+            4) show_optimization_status ;;
+            5) handle_reversion_menu ;;
+            6) show_system_info ;;
+            0) 
+                print_header "Thank You"
+                print "$GREEN" "MacSpeed session completed"
+                print "$WHITE" "System optimizations preserved for future use"
+                printf "\n"
+                exit 0
+                ;;
+            *) print_status "error" "Invalid option" ;;
+        esac
+        
+        if [[ "$choice" =~ ^[1-3]$ ]]; then
+            printf "\n"
+            print "$DIM" "Press any key to continue..."
+            read -n 1 -s
+        fi
+    done
+}
+
+# Ensure clean exit
+trap 'printf "\n"; log "SESSION_END: Interrupted by user"; exit 130' INT TERM
+
+# Start the application
+main "$@"

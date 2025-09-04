@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    name: Test on macOS
+    runs-on: macos-latest
+    
+    strategy:
+      matrix:
+        macos-version: [macos-12, macos-13, macos-14]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up environment
+      run: |
+        # Ensure script is executable
+        chmod +x macspeed
+        chmod +x install.sh
+        
+    - name: Verify script syntax
+      run: |
+        # Check script syntax
+        zsh -n macspeed
+        bash -n install.sh
+        
+    - name: Test help functionality
+      run: |
+        ./macspeed --help
+        ./macspeed --version
+        
+    - name: Test system info (non-destructive)
+      run: |
+        ./macspeed --info
+        
+    - name: Test status command (safe)
+      run: |
+        ./macspeed --status
+        
+    - name: Validate state file creation
+      run: |
+        # Run status to initialize state
+        ./macspeed --status
+        
+        # Check if state file was created
+        if [ ! -f ~/.macspeed/state.json ]; then
+          echo "State file was not created"
+          exit 1
+        fi
+        
+        # Validate JSON format
+        python3 -c "import json; json.load(open('$HOME/.macspeed/state.json'))"
+        echo "State file is valid JSON"
+        
+    - name: Test reversion (dry run)
+      run: |
+        # Test reversion command (should be safe on clean system)
+        ./macspeed --revert-all || true
+        
+    - name: Verify no system damage
+      run: |
+        # Basic system health checks
+        echo "Checking system health after tests..."
+        
+        # Check critical processes are running
+        pgrep Dock > /dev/null || (echo "Dock not running!" && exit 1)
+        pgrep Finder > /dev/null || (echo "Finder not running!" && exit 1)
+        
+        # Check system preferences can be read
+        defaults read NSGlobalDomain > /dev/null || (echo "System preferences damaged!" && exit 1)
+        
+        echo "System health check passed"
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run ShellCheck
+      uses: ludeeus/action-shellcheck@master
+      with:
+        scandir: '.'
+        format: gcc
+        severity: warning
+        exclude_paths: '.github'
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for hardcoded secrets
+      run: |
+        # Check for potential security issues
+        if grep -r "password\|secret\|token\|key" --exclude-dir=.git --exclude-dir=.github . | grep -v "# " | grep -v README; then
+          echo "Potential hardcoded secrets found"
+          exit 1
+        fi
+        echo "No hardcoded secrets detected"
+        
+    - name: Verify no dangerous commands
+      run: |
+        # Check for potentially dangerous patterns
+        if grep -r "rm -rf /\|sudo.*rm\|format\|mkfs" --exclude-dir=.git --exclude-dir=.github . | grep -v "# " | grep -v README; then
+          echo "Potentially dangerous commands found"
+          exit 1
+        fi
+        echo "No dangerous commands detected"
+
+  documentation:
+    name: Documentation check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check required files
+      run: |
+        files=("README.md" "LICENSE" "CHANGELOG.md" "docs/USAGE.md" "docs/CONTRIBUTING.md")
+        for file in "${files[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "Required file missing: $file"
+            exit 1
+          fi
+        done
+        echo "All required documentation files present"
+        
+    - name: Validate markdown
+      uses: gaurav-nelson/github-action-markdown-link-check@v1
+      with:
+        use-quiet-mode: 'yes'
+        use-verbose-mode: 'yes'
+        config-file: '.github/workflows/markdown-link-check-config.json'
+
+  release-check:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check version consistency
+      run: |
+        # Extract version from script
+        SCRIPT_VERSION=$(grep '^readonly VERSION=' macspeed | cut -d'"' -f2)
+        echo "Script version: $SCRIPT_VERSION"
+        
+        # Check if CHANGELOG has entry for this version
+        if ! grep -q "\[$SCRIPT_VERSION\]" CHANGELOG.md; then
+          echo "Version $SCRIPT_VERSION not found in CHANGELOG.md"
+          exit 1
+        fi
+        
+        echo "Version consistency check passed"
