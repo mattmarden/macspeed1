@@ -215,9 +215,17 @@ try:
     with open('$STATE_FILE', 'r') as f:
         data = json.load(f)
     
+    # Handle different value types
     if '$field' in data.get('optimizations', {}):
-        data['optimizations']['$field'] = $value
+        # For optimization fields, treat as boolean
+        if '$value' in ['true', 'True']:
+            data['optimizations']['$field'] = True
+        elif '$value' in ['false', 'False']:
+            data['optimizations']['$field'] = False
+        else:
+            data['optimizations']['$field'] = '$value'
     else:
+        # For other fields, keep as string
         data['$field'] = '$value'
     
     data['last_run'] = datetime.now().isoformat()
